@@ -1,0 +1,180 @@
+---
+- name: Install decidim application
+  hosts: localhost
+  become: yes
+  vars:
+    decidim_app_name: decidim_app # change this to your desired application name
+    decidim_app_user: decidim_user # change this to your desired user name
+    decidim_app_password: Password1 # change this to your desired password
+    decidim_app_domain: decidim.example.com # change this to your desired domain name
+  tasks:
+    - name: Install dependencies
+      apt:
+        name:
+          - build-essential
+          - curl
+          - git
+          - libssl-dev
+          - zlib1g-dev
+          - autoconf
+          - bison
+          - postgresql
+          - libpq-dev
+          - libicu-dev
+          - ruby-dev
+          - python3-psycopg2
+        state: present
+      tags: [install]
+
+    - name: "Create app database"
+      postgresql_db:
+        state: present
+        name: "decidim_appdb"
+      become: yes
+      become_user: postgres
+
+    - name: "Create db user"
+      postgresql_user:
+        state: present
+        name: "decidim_user"
+        password: "Password1"
+      become: yes
+      become_user: postgres
+
+    - name: "Grant db user access to app db"
+      postgresql_privs:
+        type: database
+        database: "decidim_appdb"
+        roles: "decidim_user"
+        grant_option: no
+        privs: all
+      become: yes
+      become_user: postgres
+
+    - name: "Allow md5 connection for the db user"
+      postgresql_pg_hba:
+        dest: "/etc/postgresql/12/main/pg_hba.conf"
+        contype: host
+        databases: all
+        method: md5
+        users: "decidim_user"
+        create: true
+      become: yes
+      become_user: postgres
+      notify: restart postgres
+
+    - name: Install rbenv and ruby-build
+      shell: >
+        curl -fsSL https://github.com/rbenv/rbenv-installer/raw/HEAD/bin/rbenv-installer | bash &&
+        echo 'export PATH="$HOME/.rbenv/bin:$PATH"' >> ~/.bashrc &&
+        echo 'eval "$(rbenv init -)"' >> ~/.bashrc
+        #when: ansible_os_family == "Debian"
+
+    - name: Verify rbenv is in the path
+      shell: echo $PATH
+      register: rbenv_path
+      #when: ansible_os_family == "Debian"
+
+    - name: Add rbenv initialization to ~/.bashrc
+      blockinfile:
+        path: ~/.bashrc
+        block: |
+          export PATH="$HOME/.rbenv/bin:$PATH"
+          eval "$(rbenv init -)"
+      become: yes
+      become_user: 'root'
+
+    - name: Debug - Before reloading shell
+      debug:
+        msg: "Before reloading shell"
+
+    - name: Reload shell
+      shell: /bin/bash -c "source ~/.bashrc"
+
+    - name: Debug - After reloading shell
+      debug:
+        msg: "After reloading shell"
+
+
+    - name: Install Ruby 3.0.2
+      command: /bin/bash -i -c "source ~/.bashrc && rbenv install 3.0.2"
+      environment:
+        PATH: "{{ rbenv_path.stdout }}:{{ ansible_env.HOME }}/.rbenv/plugins/ruby-build/bin"
+        #when: ansible_os_family == "Debian"
+      async: 3600
+      poll: 0
+      register: ruby_install_result
+
+    - name: Set global Ruby version to 3.0.2
+      command: /bin/bash -i -c "source ~/.bashrc && rbenv global 3.0.2"
+      environment:
+        PATH: "{{ rbenv_path.stdout }}:{{ ansible_env.HOME }}/.rbenv/plugins/ruby-build/bin"
+        #when: ansible_os_family == "Debian"
+      async: 3600
+      poll: 0
+
+    - name: Add Node.js 18.x repository
+      shell: curl -s https://deb.nodesource.com/setup_18.x | sudo bash
+
+    - name: Install Node.js 18.x
+      apt:
+        name: nodejs
+        state: present
+        #when: ansible_os_family == "Debian"
+
+    - name: Install Yarn
+      npm:
+        name: yarn
+        global: yes
+        state: present
+        #when: ansible_os_family == "Debian"
+
+    - name: Install ImageMagick
+      apt:
+        name: imagemagick
+        state: present
+        #when: ansible_os_family == "Debian"
+
+    - name: Install Decidim gem
+      shell: gem install decidim
+      become_user: 'root'
+      environment:
+        PATH: "{{ ansible_env.PATH }}"
+
+    - name: Create a Decidim application
+      shell: decidim decidim_application
+      become_user: 'root'
+      environment:
+        PATH: "{{ ansible_env.PATH }}"
+
+    - name: Clone rbenv-vars plugin
+      shell: git clone https://github.com/rbenv/rbenv-vars.git "$(rbenv root)"/plugins/rbenv-vars
+      become_user: 'root'
+      environment:
+        PATH: "{{ ansible_env.PATH }}"
+
+    - name: Set environment variables
+      blockinfile:
+        path: "{{ playbook_dir }}/.rbenv-vars"
+        create: yes
+        block: |
+          DATABASE_HOST=localhost
+          DATABASE_USERNAME=decidim_app
+          DATABASE_PASSWORD=Password1
+
+    - name: Create Decidim database and run migrations
+      command: /bin/bash -i -c "source ~/.bashrc && bin/rails db:create db:migrate"
+      args:
+          chdir: /home/ubuntu/decidim_application
+          ignore_errors: yes
+      
+    - name: Seed Decidim database (for development)
+      command: /bin/bash -i -c "source ~/.bashrc && bin/rails db:seed"
+      args:
+       chdir: /home/ubuntu/decidim_application
+      ignore_errors: yes
+      
+    - name: Start Decidim web server
+      command: /bin/bash -i -c "source ~/.bashrc && bin/rails s"
+      args:
+        chdir: /home/ubuntu/decidim_application
